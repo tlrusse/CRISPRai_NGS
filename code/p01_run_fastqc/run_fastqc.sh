@@ -1,4 +1,4 @@
-# code was run in cellprofiler_test conda env
+# code was run in cellprofiler_test conda env for user tlrusse
 
 cd $DATA_IN/fastqs_15107-PP
 
