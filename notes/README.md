@@ -1,5 +1,8 @@
 # Notes for CRISPRai_NGS
 ---
+## 20260204
+- go over mageck count
+
 ## 20260203
 - ran fastqc
 - demuxed the 4 samples using bowtie2 and samtools
