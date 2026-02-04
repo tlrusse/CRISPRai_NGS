@@ -26,7 +26,7 @@ if [ ! -L $DATA_IN_LINK ]; then
 fi
 DATA_OUT_LINK=./data_out
 if [ ! -L $DATA_OUT_LINK ]; then
-    ln -s /mnt/speliotes-lab/Projects/UK_ATLAS/IndivProj/${PROJ_ORIGINATOR}/CRISPRai_NGS/ $DATA_OUT_LINK
+    ln -s $DATA_OUT $DATA_OUT_LINK
 fi
 
 cd code
