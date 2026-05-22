@@ -17,6 +17,7 @@ from multiprocessing import Pool, cpu_count
 from typing import Set, Tuple, List, Optional
 from tqdm import tqdm
 from contextlib import ExitStack
+import time
 
 # set and grab the cli arguments
 parser = argparse.ArgumentParser()
@@ -29,6 +30,7 @@ parser.add_argument("-b","--buffer_size", help="the buffer size in lines to read
 args = parser.parse_args()
 
 IO_BUFFER_SIZE_FOR_SHUTIL = 16 * 1024 * 1024  # 16 MB buffer size for shutil.copyfileobj, which is a good balance between speed and memory usage
+TICK_INTERVAL_FOR_PROGRESS = 0.2  # seconds between progress bar updates
 
 def calculate_read_offsets(sam_file:str, ncores:int, debug:bool = False) -> list:
     """_summary_
@@ -275,9 +277,43 @@ def parallel_process_chunks(args_list: list, ncores: int) -> None:
         args_list (list): a list of tuples containing the arguments for each core's processing function
         ncores (int): the number of cores to use for parallel processing
     """
+    helper_dir = Path(f"{output_header}_parallel_helpers")
+    
+    # Estimate total compressed/output footprint based on the raw input size
+    # (Since FASTQ data is highly correlated with the input SAM size)
+    total_input_size = os.path.getsize(args_list[0][0])
 
     with Pool(processes=ncores) as pool:
-        list(tqdm(pool.imap_unordered(process_chunk, args_list), total=len(args_list), desc="Processing chunks in parallel"))
+        # Launch all 32 workers instantly in the background
+        # pool.map_async returns a token we can check for completion status
+        result_token = pool.map_async(process_chunk, args_list)
+
+        # Run our lightweight file sizes tracking loop until they finish
+        track_disk_progress(helper_dir, total_input_size, result_token)
+        
+        # Securely join the pool execution paths
+        result_token.wait()
+
+def track_disk_progress(helper_dir: Path, total_expected_size: int, pool_result):
+    """Watches the growth of intermediate files on disk to drive the progress bar."""
+    with tqdm(total=total_expected_size, desc="Demuxing SAM file", unit="B", unit_scale=True) as pbar:
+        last_bytes = 0
+        
+        # Loop as long as the pool tasks are still running
+        while not pool_result.ready():
+            time.sleep(TICK_INTERVAL_FOR_PROGRESS)  # Wake up every 500ms to check disk state
+            
+            # Sum up the physical size of all files written by the workers so far
+            current_bytes = sum(f.stat().st_size for f in helper_dir.rglob("*") if f.is_file())
+            
+            # Update the progress bar by the difference since our last check
+            if current_bytes > last_bytes:
+                pbar.update(current_bytes - last_bytes)
+                last_bytes = current_bytes
+                
+        # Once the pool finishes, force the bar to snap to 100% to clean up any rounding mismatches
+        if total_expected_size > last_bytes:
+            pbar.update(total_expected_size - last_bytes)
 
 def main(s:str,c:Set[str],o:str,ncores:int,buffer_size:int,debug:bool = False) -> None:
     """_summary_
