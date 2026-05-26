@@ -236,39 +236,62 @@ def process_chunk(args: Tuple[str, str, Set[str], int, int, int, int]) -> None:
             empty_buffer(buffer)
 
 def merge_intermediate_files(folders: List[str], output_folder: str, debug: bool = False) -> None:
-    """Merge the fastq and sam files from the specified folders into the output_folder, ensuring that files with the same name are concatenated together.
-
-    Args:
-        folders (List[str]): a list of folders containing the intermediate files to be merged
-        output_folder (str): the folder where the merged files will be stored
-        debug (bool, optional): whether or not to print debug statements. Defaults to False.
+    """Merge the fastq and sam files from the specified folders into the output_folder, 
+    tracking the global merge progress with a single smooth tqdm byte counter.
     """
     fnames_in_folders = [set(os.listdir(folder)) for folder in folders]
     all_fnames = set().union(*fnames_in_folders)
-    for fname in all_fnames:
-        nmerges = 0
-        output_path = os.path.join(output_folder, fname)
-        # Open a context stack for this specific barcode file
-        with ExitStack() as stack:
-            of = None
-            for folder in folders:
-                cur_fname = os.path.join(folder, fname)
-                # check if the cur_fname exists
-                if not os.path.exists(cur_fname):
-                    continue
-                if of is None:
-                    # we want to just move the first file we encounter with this name to the output folder to avoid unnecessary copying
-                    shutil.move(cur_fname, output_path)
-                    # now we want to open the output file in append binary mode to write to it for the remaining files
-                    of = stack.enter_context(open(output_path, "ab"))
-                else:
-                    # we want to append the contents of the current file to the output file
-                    with open(cur_fname, "rb") as f:
-                        shutil.copyfileobj(f, of, length=IO_BUFFER_SIZE_FOR_SHUTIL)
-                nmerges += 1
-        # exit stack automatically closes of 
-        if debug:
-            print(f"Merged file: {output_path}, Number of merges: {nmerges}")
+    
+    # Pre-calculate the total byte size of ALL intermediate files to merge
+    total_merge_bytes = 0
+    for folder in folders:
+        for fname in all_fnames:
+            cur_fname = os.path.join(folder, fname)
+            if os.path.exists(cur_fname):
+                total_merge_bytes += os.path.getsize(cur_fname)
+
+    # Wrap the entire merge loop in a single tqdm context manager
+    with tqdm(total=total_merge_bytes, desc="Merging intermediate files".ljust(30), unit="B", unit_scale=True) as pbar:
+        for fname in all_fnames:
+            nmerges = 0
+            output_path = os.path.join(output_folder, fname)
+            
+            with ExitStack() as stack:
+                of = None
+                for folder in folders:
+                    cur_fname = os.path.join(folder, fname)
+                    if not os.path.exists(cur_fname):
+                        continue
+                    
+                    # Track file size for progress updates
+                    file_size = os.path.getsize(cur_fname)
+                    
+                    if of is None:
+                        # Optimization: Move the first file directly.
+                        shutil.move(cur_fname, output_path)
+                        # Open the output file in append binary mode
+                        of = stack.enter_context(open(output_path, "ab"))
+                        
+                        # Update progress for the file we just instantly moved
+                        pbar.update(file_size)
+                    else:
+                        # Append the contents using a custom loop to catch streaming blocks
+                        with open(cur_fname, "rb") as f:
+                            while True:
+                                buf = f.read(IO_BUFFER_SIZE_FOR_SHUTIL)
+                                if not buf:
+                                    break
+                                of.write(buf)
+                                # Update progress bar in real-time as chunks hit the disk
+                                pbar.update(len(buf))
+                                
+                        # Delete the source file since we appended it to prevent memory footprint to minimum required for output
+                        os.remove(cur_fname)
+                        
+                    nmerges += 1
+            
+            if debug:
+                print(f"Merged file: {output_path}, Number of merges: {nmerges}")
 
 def parallel_process_chunks(args_list: list, ncores: int) -> None:
     """Function to parallel process the chunks from the sam file using the multiprocessing Pool.
@@ -296,7 +319,7 @@ def parallel_process_chunks(args_list: list, ncores: int) -> None:
 
 def track_disk_progress(helper_dir: Path, total_expected_size: int, pool_result):
     """Watches the growth of intermediate files on disk to drive the progress bar."""
-    with tqdm(total=total_expected_size, desc="Demuxing SAM file", unit="B", unit_scale=True) as pbar:
+    with tqdm(total=total_expected_size, desc="Demuxing SAM file".ljust(30), unit="B", unit_scale=True) as pbar:
         last_bytes = 0
         
         # Loop as long as the pool tasks are still running
